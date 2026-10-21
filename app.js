@@ -3,17 +3,76 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import QRCode from 'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm';
 const sb=createClient(SUPABASE_URL,SUPABASE_ANON_KEY), $=id=>document.getElementById(id);
 let devices=[],history=[],selected=null,admin=false;
+let qrScanner=null,qrStarting=false,qrStopping=false;
 function say(s,ok=false){$('msg').textContent=s;$('msg').className=ok?'ok':''}
 function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function rpc(fn,args={}){const {data,error}=await sb.rpc(fn,args);if(error)throw Error(error.message);if(!data?.ok)throw Error(data?.error||'操作失敗');return data}
 async function run(fn){try{say('');await fn()}catch(e){say(e.message||String(e))}}
-function show(tab){for(const id of ['scan','list','admin'])$(id).hidden=id!==tab;document.querySelectorAll('nav button').forEach(b=>b.disabled=b.dataset.tab===tab)}
+function show(tab){if(tab!=='scan')void stopQrScanner();for(const id of ['scan','list','admin'])$(id).hidden=id!==tab;document.querySelectorAll('nav button').forEach(b=>b.disabled=b.dataset.tab===tab)}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{show(b.dataset.tab);if(b.dataset.tab==='list')run(refresh)});
 async function refresh(){devices=(await rpc('equipmgr_list')).items;renderList()}
 function status(d){return d.status==='borrowed'?(d.due_at&&d.due_at.slice(0,10)<new Date().toISOString().slice(0,10)?'逾期':'借出中'):'在庫'}
 function renderList(){$('summary').textContent=`設備總數 ${devices.length} ｜ 在庫 ${devices.filter(x=>x.status==='available').length} ｜ 借出 ${devices.filter(x=>x.status==='borrowed').length}`;$('items').innerHTML=devices.map(d=>`<tr><td>${safe(d.code)}</td><td>${safe(d.name)}</td><td>${status(d)}</td><td>${safe(d.borrower)}</td><td>${safe(d.due_at?.slice(0,10))}</td><td><button data-code="${safe(d.code)}">操作</button></td></tr>`).join('');$('items').querySelectorAll('button').forEach(b=>b.onclick=()=>{show('scan');$('code').value=b.dataset.code;run(findDevice)})}
 async function findDevice(){const code=$('code').value.trim();if(!code)throw Error('請輸入設備編碼');const r=await rpc('equipmgr_get',{p_code:code});selected=r.item;$('device').innerHTML=`<h3>${safe(selected.name)}</h3><p>編碼：${safe(selected.code)} ｜ 狀態：${status(selected)}</p><p>型號：${safe(selected.model)} ｜ 位置：${safe(selected.location)}</p>${selected.status==='borrowed'?`<p>借用人：${safe(selected.borrower)} ｜ 預計歸還：${safe(selected.due_at?.slice(0,10))}</p>`:''}`;$('action').hidden=false;$('borrow').hidden=selected.status!=='available';$('return').hidden=selected.status!=='borrowed';$('dueLabel').hidden=selected.status!=='available'}
-$('find').onclick=()=>run(findDevice);
+// QR Code 掃描：支援本系統產生的 ?device=EQ-0001 網址與純設備編碼。
+function decodeEquipmentQr(raw){
+  const value=String(raw??'').trim();
+  if(!value)throw Error('QR Code 沒有內容');
+  let code=value;
+  try{
+    const url=new URL(value);
+    // 避免掃描外部網站網址後被當成設備編碼；僅接受本站產生的 QR URL。
+    if(url.origin!==location.origin || url.pathname!==location.pathname)throw Error('這不是本設備借還系統的 QR Code');
+    code=url.searchParams.get('device')||'';
+  }catch(e){
+    if(e.message==='這不是本設備借還系統的 QR Code')throw e;
+    if(/^https?:\/\//i.test(value))throw Error('QR Code 網址格式不正確');
+  }
+  code=code.trim();
+  if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(code))throw Error('QR Code 的設備編碼格式不正確');
+  return code;
+}
+async function stopQrScanner(){
+  $('qrScannerPanel').hidden=true;
+  const instance=qrScanner;
+  qrScanner=null;
+  if(!instance)return;
+  try{await instance.stop()}catch{}
+  try{instance.clear()}catch{}
+}
+$('scanQr').onclick=()=>run(async()=>{
+  if(qrStarting||qrScanner)return;
+  if(!window.isSecureContext)throw Error('相機功能需要 HTTPS，請使用 GitHub Pages 網址');
+  if(!navigator.mediaDevices?.getUserMedia)throw Error('此瀏覽器不支援相機存取，請使用手機 Chrome 或 Safari');
+  if(typeof Html5Qrcode==='undefined')throw Error('QR 掃描套件載入失敗，請檢查網路後重新整理');
+  qrStarting=true;
+  $('qrScannerPanel').hidden=false;
+  $('qrScanStatus').textContent='正在啟動相機，請允許相機權限…';
+  const scanner=new Html5Qrcode('qrReader',{verbose:false});
+  qrScanner=scanner;
+  try{
+    await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:230,height:230}},async decoded=>{
+      if(qrStopping)return;
+      qrStopping=true;
+      try{
+        const code=decodeEquipmentQr(decoded);
+        await stopQrScanner();
+        $('code').value=code;
+        await run(findDevice);
+      }catch(e){
+        $('qrScanStatus').textContent=e.message||'無法辨識設備 QR Code，請重試';
+        if(qrScanner===scanner)qrStopping=false;
+        else say(e.message||String(e));
+      }
+    },()=>{});
+    $('qrScanStatus').textContent='請將設備 QR Code 對準掃描框';
+  }catch(e){
+    await stopQrScanner();
+    throw Error('無法開啟相機：'+(e.message||String(e))+'。請確認已允許相機權限。');
+  }finally{qrStarting=false}
+});
+$('stopQr').onclick=()=>{qrStopping=false;void stopQrScanner()};
+$('find').onclick=()=>run(async()=>{await stopQrScanner();await findDevice()});
 async function transact(kind){if(!selected)throw Error('請先查詢設備');const name=$('person').value.trim();if(!name)throw Error('請填寫操作人員姓名');const r=await rpc('equipmgr_transact',{p_code:selected.code,p_person:name,p_action:kind,p_note:$('note').value.trim(),p_due:$('due').value||null});say(kind==='borrow'?'借出成功':'歸還成功',true);$('note').value='';await findDevice();await refresh()}
 $('borrow').onclick=()=>run(()=>transact('borrow'));$('return').onclick=()=>run(()=>transact('return'));
 async function checkAdmin(){const {data}=await sb.auth.getUser();admin=false;if(data?.user){try{await rpc('em_admin_check');admin=true}catch{}}$('login').hidden=admin;$('adminTools').hidden=!admin;if(admin){await refresh();await loadHistory()}}
