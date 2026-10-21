@@ -20,16 +20,10 @@ async function checkAdmin(){const {data}=await sb.auth.getUser();admin=false;if(
 $('signIn').onclick=()=>run(async()=>{const {error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error)throw Error(error.message);await checkAdmin();if(!admin)throw Error('此帳號不是保養系統管理員');say('登入成功',true)});
 $('signOut').onclick=()=>run(async()=>{await sb.auth.signOut();await checkAdmin();say('已登出',true)});
 $('save').onclick=()=>run(async()=>{await rpc('equipmgr_admin_upsert',{p_item:{code:$('aCode').value.trim(),name:$('aName').value.trim(),model:$('aModel').value.trim(),location:$('aLocation').value.trim(),notes:$('aNotes').value.trim()}});await refresh();say('設備已儲存',true)});
-function csvCell(v){const s=String(v??'');return /[",
-
-]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
-function download(name,rows){const csv='﻿'+rows.map(row=>row.map(csvCell).join(',')).join('
-');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function csvCell(v){const s=String(v??'');return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function download(name,rows){const csv='﻿'+rows.map(row=>row.map(csvCell).join(',')).join('\r\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 $('export').onclick=()=>run(async()=>{await refresh();download('equipment.csv',[['code','name','model','location','notes'],...devices.map(x=>[x.code,x.name,x.model,x.location,x.notes])])});
-function parseCSV(text){const rows=[];let row=[],field='',quote=false;for(let i=0;i<text.length;i++){const c=text[i];if(quote){if(c==='"'&&text[i+1]==='"'){field+='"';i++}else if(c==='"')quote=false;else field+=c}else if(c==='"')quote=true;else if(c===','){row.push(field);field=''}else if(c==='
-'){row.push(field.replace(/
-$/,''));rows.push(row);row=[];field=''}else field+=c}if(quote)throw Error('CSV 引號格式錯誤');if(field||row.length){row.push(field.replace(/
-$/,''));rows.push(row)}return rows}
+function parseCSV(text){const rows=[];let row=[],field='',quote=false;for(let i=0;i<text.length;i++){const c=text[i];if(quote){if(c==='"'&&text[i+1]==='"'){field+='"';i++}else if(c==='"')quote=false;else field+=c}else if(c==='"')quote=true;else if(c===','){row.push(field);field=''}else if(c==='\n'){row.push(field.replace(/\r$/,''));rows.push(row);row=[];field=''}else field+=c}if(quote)throw Error('CSV 引號格式錯誤');if(field||row.length){row.push(field.replace(/\r$/,''));rows.push(row)}return rows}
 $('import').onclick=()=>run(async()=>{const file=$('csvFile').files[0];if(!file)throw Error('請選擇 CSV');const rows=parseCSV((await file.text()).replace(/^﻿/,''));const header=['code','name','model','location','notes'];if(header.some((x,i)=>rows[0]?.[i]!==x))throw Error('CSV 標題必須為 '+header.join(','));const items=rows.slice(1).filter(r=>r.some(x=>x.trim())).map(r=>Object.fromEntries(header.map((h,i)=>[h,r[i]||''])));if(items.length>200)throw Error('每次最多匯入 200 筆');if(!confirm(`確認匯入 ${items.length} 筆設備？同編碼將更新設備基本資料。`))return;await rpc('equipmgr_admin_import',{p_items:items});await refresh();say('匯入完成',true)});
 async function loadHistory(){history=(await rpc('equipmgr_admin_history')).items;$('history').innerHTML=history.map(h=>`<tr><td>${safe(h.code)}</td><td>${safe(h.borrower)}</td><td>${safe(h.borrowed_at)}</td><td>${safe(h.due_at)}</td><td>${safe(h.returned_by)}</td><td>${safe(h.returned_at)}</td></tr>`).join('')}
 $('historyRefresh').onclick=()=>run(loadHistory);$('historyExport').onclick=()=>run(async()=>{await loadHistory();download('loan_history.csv',[['code','borrower','borrowed_at','due_at','returned_by','returned_at','note','return_note'],...history.map(h=>[h.code,h.borrower,h.borrowed_at,h.due_at,h.returned_by,h.returned_at,h.note,h.return_note])])});
